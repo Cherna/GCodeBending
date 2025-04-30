@@ -10,9 +10,9 @@ GCodeLine = namedtuple('GCodeLine', 'x y z e f')
 
 
 #################   USER INPUT PARAMETERS   #########################
-
-INPUT_FILE_NAME = "hod_input.gcode"
-OUTPUT_FILE_NAME = "hod_bent.gcode" 
+GCODE_FOLDER = "gcode/"  # Folder where the GCode files are located
+INPUT_FILE_NAME = GCODE_FOLDER + "Cylinder.gcode"
+OUTPUT_FILE_NAME = GCODE_FOLDER + "BENT_" + INPUT_FILE_NAME.split("/")[-1]
 LAYER_HEIGHT = 0.25 #Layer height of the sliced gcode
 WARNING_ANGLE = 30 #Maximum Angle printable with your setup
 MINIMUM_EXTRUSION = 0.0001  # Minimum extrusion so the E motor does not go BRrRrRrRrR
@@ -20,7 +20,7 @@ MINIMUM_EXTRUSION = 0.0001  # Minimum extrusion so the E motor does not go BRrRr
 # Setup the arcing spline
 SPLINE_X = [125, 125.035, 125.085, 125.5]
 SPLINE_Z = [0, 3.5, 6, 16]
-SPLINE_ANGLES_DEGREES = [0, 1.5, 1.5, 5]  # degrees
+SPLINE_ANGLES_DEGREES = [0, 10, 4, 5]  # degrees
 
 #################   USER INPUT PARAMETERS END  #########################
 
@@ -39,26 +39,39 @@ DISCRETIZATION_LENGTH = 0.01  # Discretization length for the spline length look
 # Optional: create a placeholder spline length lookup table
 SplineLookupTable = [0.0]
 
-# Plotting the spline
+# Plotting the spline in 2D
 xs = np.linspace(0, SPLINE_Z[-1], 200)
-fig, ax = plt.subplots(figsize=(6.5, 6))  # square aspect
-ax.plot(SPLINE_X, SPLINE_Z, 'o', label='Control Points')
-ax.plot(SPLINE(xs), xs, label='Spline')
+
+# --- 3D Visualization of the spline (XZ plane, Y=0) ---
+fig3d = plt.figure(figsize=(8, 6))
+ax3d = fig3d.add_subplot(111, projection='3d')
+ax3d.plot(SPLINE(xs), np.zeros_like(xs), xs, label='Spline (XZ)')
+ax3d.scatter(SPLINE_X, np.zeros_like(SPLINE_X), SPLINE_Z, color='red', label='Control Points')
 
 # Calculate bounds and apply even range to both axes
-x_min, x_max = min(SPLINE_X), max(SPLINE_X)
-z_min, z_max = min(SPLINE_Z), max(SPLINE_Z)
+x_min = min(SPLINE_X)
+x_max = max(SPLINE_X)
+z_min = min(SPLINE_Z)
+z_max = max(SPLINE_Z)
 
 x_center = (x_min + x_max) / 2
 z_center = (z_min + z_max) / 2
 
 half_range = max((x_max - x_min), (z_max - z_min)) / 2 + 1  # add padding
 
-ax.set_xlim(x_center - half_range, x_center + half_range)
-ax.set_ylim(z_center - half_range, z_center + half_range)
+ax3d.set_xlim(x_center - half_range, x_center + half_range)
+ax3d.set_ylim(-half_range, half_range)  # Y axis (centered at 0)
+ax3d.set_zlim(z_center - half_range, z_center + half_range)
 
-ax.set_aspect('equal', adjustable='box')
-plt.legend()
+# Set equal aspect ratio
+ax3d.set_box_aspect([np.ptp([x_center - half_range, x_center + half_range]),
+                     np.ptp([-half_range, half_range]),
+                     np.ptp([z_center - half_range, z_center + half_range])])
+
+ax3d.set_xlabel('X')
+ax3d.set_ylabel('Y')
+ax3d.set_zlabel('Z')
+ax3d.legend()
 plt.show()
 
 
@@ -101,94 +114,86 @@ relativeMode = False
 createSplineLookupTable()
 
 with open(INPUT_FILE_NAME, "r") as gcodeFile, open(OUTPUT_FILE_NAME, "w+") as outputFile:
-    bending_section = False  # Flag to indicate if we're inside the bending section
-
     for currentLine in gcodeFile:
-        if currentLine.strip() == ";BEND_START":
-            bending_section = True  # Start processing the bending section
+        if currentLine[0] == ";":  # If it's a comment line
+            outputFile.write(currentLine)
             continue
-        elif currentLine.strip() == ";BEND_END":
-            bending_section = False  # End processing the bending section
+        if currentLine.find("G91 ") != -1:  # Filter relative commands (skip G91)
+            continue  # Skip this line, no need to write it
+        if currentLine.find("G90 ") != -1:  # Set absolute mode (skip G90)
+            continue  # Skip this line, no need to write it
+        if relativeMode:  # If in relative mode don't do anything
+            outputFile.write(currentLine)
             continue
 
-        if bending_section:  # Only process lines inside the bending section
-            if currentLine[0] == ";":  # If it's a comment line
-                outputFile.write(currentLine)
-                continue
-            if currentLine.find("G91 ") != -1:  # Filter relative commands (skip G91)
-                continue  # Skip this line, no need to write it
-            if currentLine.find("G90 ") != -1:  # Set absolute mode (skip G90)
-                continue  # Skip this line, no need to write it
-            if relativeMode:  # If in relative mode don't do anything
-                outputFile.write(currentLine)
-                continue
+        currentLineCommands = parseGCode(currentLine)
+        if currentLineCommands is not None:  # If current command is valid G-code
+            if currentLineCommands.z is not None:  # If there is a Z height in the command
+                currentZ = float(currentLineCommands.z)
 
-            currentLineCommands = parseGCode(currentLine)
-            if currentLineCommands is not None:  # If current command is valid G-code
-                if currentLineCommands.z is not None:  # If there is a Z height in the command
-                    currentZ = float(currentLineCommands.z)
-
-                if currentLineCommands.x is None or currentLineCommands.y is None:  # If no X/Y movement
-                    if currentLineCommands.z is not None:  # Only Z movement (e.g., Z-hop)
-                        outputFile.write("G1 ")
-                        if currentLineCommands.f is not None:
-                            outputFile.write(" F" + str(currentLineCommands.f))
-                        outputFile.write("\n")
-                        lastZ = currentZ
-                        continue
-                    outputFile.write(currentLine)
+            if currentLineCommands.x is None or currentLineCommands.y is None:  # If no X/Y movement
+                if currentLineCommands.z is not None:  # Only Z movement (e.g., Z-hop)
+                    outputFile.write("G1 ")
+                    if currentLineCommands.f is not None:
+                        outputFile.write(" F" + str(currentLineCommands.f))
+                    outputFile.write("\n")
+                    lastZ = currentZ
                     continue
-
-                currentPosition = Point2D(float(currentLineCommands.x), float(currentLineCommands.y))
-                midpointX = lastPosition.x + (currentPosition.x - lastPosition.x) / 2  # Look for midpoint
-                distToSpline = midpointX - SPLINE_X[0]
-
-                # Correct the Z-height if the spline gets followed
-                correctedZHeight = onSplineLength(currentZ)
-
-                angleSplineThisLayer = np.arctan(SPLINE(correctedZHeight, 1))  # Inclination angle this layer
-                angleLastLayer = np.arctan(SPLINE(correctedZHeight - LAYER_HEIGHT, 1))  # Inclination angle previous layer
-                heightDifference = np.sin(angleSplineThisLayer - angleLastLayer) * distToSpline * -1  # Layer height difference
-
-                transformedGCode = getNormalPoint(
-                    Point2D(correctedZHeight, SPLINE(correctedZHeight)),
-                    SPLINE(correctedZHeight, 1),
-                    currentPosition.x - SPLINE_X[0]
-                )
-
-                # Check if a move is below Z = 0
-                if float(transformedGCode.x) <= 0.0: 
-                    print("Warning! Movement below build platform. Check your spline!")
-
-                # Detect implausible moves
-                if transformedGCode.x < 0 or np.abs(transformedGCode.x - currentZ) > 50:
-                    print("Warning! Possibly implausible move detected at height " + str(currentZ) + " mm!")
-                    outputFile.write(currentLine)
-                    continue    
-                # Check for self-intersection
-                if (LAYER_HEIGHT + heightDifference) < 0:
-                    print("ERROR! Self-intersection at height " + str(currentZ) + " mm! Check your spline!")
-
-                # Check the angle of the printed layer and warn if it's above the machine limit
-                if angleSplineThisLayer > (WARNING_ANGLE * np.pi / 180.):
-                    print("Warning! Spline angle is", (angleSplineThisLayer * 180. / np.pi), "at height", str(currentZ), "mm! Check your spline!")
-
-                if currentLineCommands.e is not None:  # If extrusion is present
-                    extrusionAmount = float(currentLineCommands.e) * ((LAYER_HEIGHT + heightDifference) / LAYER_HEIGHT)
-                    if extrusionAmount < MINIMUM_EXTRUSION:
-                        extrusionAmount = MINIMUM_EXTRUSION
-                else:
-                    extrusionAmount = None
-
-                feedrate = float(currentLineCommands.f) if currentLineCommands.f is not None else None
-
-                writeLine(1, transformedGCode.y, currentPosition.y, transformedGCode.x, feedrate, extrusionAmount)
-                lastPosition = currentPosition
-                lastZ = currentZ
-            else:
                 outputFile.write(currentLine)
+                continue
+
+            # Parse X and Y values
+            x = float(currentLineCommands.x)
+            y = float(currentLineCommands.y)
+            currentPosition = Point2D(x, y)
+
+            # Calculate midpoint
+            midpointX = lastPosition.x + (currentPosition.x - lastPosition.x) / 2  # Look for midpoint
+            distToSpline = midpointX - SPLINE_X[0]
+
+            # Correct the Z-height if the spline gets followed
+            correctedZHeight = onSplineLength(currentZ)
+
+            angleSplineThisLayer = np.arctan(SPLINE(correctedZHeight, 1))  # Inclination angle this layer
+            angleLastLayer = np.arctan(SPLINE(correctedZHeight - LAYER_HEIGHT, 1))  # Inclination angle previous layer
+            heightDifference = np.sin(angleSplineThisLayer - angleLastLayer) * distToSpline * -1  # Layer height difference
+
+            transformedGCode = getNormalPoint(
+                Point2D(correctedZHeight, SPLINE(correctedZHeight)),
+                SPLINE(correctedZHeight, 1),
+                currentPosition.x - SPLINE_X[0]
+            )
+
+            # Check if a move is below Z = 0
+            if float(transformedGCode.x) <= 0.0: 
+                print("Warning! Movement below build platform. Check your spline!")
+
+            # Detect implausible moves
+            if transformedGCode.x < 0 or np.abs(transformedGCode.x - currentZ) > 50:
+                print("Warning! Possibly implausible move detected at height " + str(currentZ) + " mm!")
+                outputFile.write(currentLine)
+                continue    
+            # Check for self-intersection
+            if (LAYER_HEIGHT + heightDifference) < 0:
+                print("ERROR! Self-intersection at height " + str(currentZ) + " mm! Check your spline!")
+
+            # Check the angle of the printed layer and warn if it's above the machine limit
+            if angleSplineThisLayer > (WARNING_ANGLE * np.pi / 180.):
+                print("Warning! Spline angle is", (angleSplineThisLayer * 180. / np.pi), "at height", str(currentZ), "mm! Check your spline!")
+
+            if currentLineCommands.e is not None:  # If extrusion is present
+                extrusionAmount = float(currentLineCommands.e) * ((LAYER_HEIGHT + heightDifference) / LAYER_HEIGHT)
+                if extrusionAmount < MINIMUM_EXTRUSION:
+                    extrusionAmount = MINIMUM_EXTRUSION
+            else:
+                extrusionAmount = None
+
+            feedrate = float(currentLineCommands.f) if currentLineCommands.f is not None else None
+
+            writeLine(1, transformedGCode.y, currentPosition.y, transformedGCode.x, feedrate, extrusionAmount)
+            lastPosition = currentPosition
+            lastZ = currentZ
         else:
-            # Copy lines outside the bending section (before ;BEND_START and after ;BEND_END)
             outputFile.write(currentLine)
     
 print("GCode bending finished!")
